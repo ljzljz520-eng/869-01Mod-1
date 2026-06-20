@@ -1,7 +1,63 @@
-// backend/public/js/collector.js - 访客信息采集器（完整版）
+// backend/public/js/collector.js - 隐私合规的访客信息采集器
 
 (function () {
-    // 解析 User-Agent 获取浏览器信息
+    const CONSENT_KEY = 'speedprobe_privacy_consent';
+    const VISITOR_KEY = 'speedprobe_visitor_id';
+
+    const getConsentStatus = () => {
+        try {
+            const status = localStorage.getItem(CONSENT_KEY);
+            return status ? parseInt(status, 10) : 0;
+        } catch (e) {
+            return 0;
+        }
+    };
+
+    const setConsentStatus = (status) => {
+        try {
+            localStorage.setItem(CONSENT_KEY, String(status));
+        } catch (e) { }
+    };
+
+    const getVisitorId = () => {
+        try {
+            return sessionStorage.getItem(VISITOR_KEY) || localStorage.getItem(VISITOR_KEY);
+        } catch (e) {
+            return null;
+        }
+    };
+
+    const setVisitorId = (id) => {
+        try {
+            sessionStorage.setItem(VISITOR_KEY, id);
+            localStorage.setItem(VISITOR_KEY, id);
+        } catch (e) { }
+    };
+
+    const getPageLoadTime = () => {
+        if (window.performance && window.performance.timing) {
+            const t = window.performance.timing;
+            if (t.loadEventEnd && t.navigationStart) {
+                return t.loadEventEnd - t.navigationStart;
+            }
+        }
+        return null;
+    };
+
+    const getPageSize = () => {
+        try {
+            if (window.performance && window.performance.getEntriesByType) {
+                const resources = window.performance.getEntriesByType('resource');
+                let totalSize = 0;
+                resources.forEach(r => {
+                    if (r.transferSize) totalSize += r.transferSize;
+                });
+                return Math.round(totalSize / 1024);
+            }
+        } catch (e) { }
+        return null;
+    };
+
     const parseUserAgent = () => {
         const ua = navigator.userAgent;
         let browser = '未知';
@@ -10,7 +66,6 @@
         let osVersion = '';
         let deviceType = '桌面设备';
 
-        // 检测浏览器
         if (ua.includes('Edg/')) {
             browser = 'Edge';
             browserVersion = ua.match(/Edg\/([\d.]+)/)?.[1] || '';
@@ -28,7 +83,6 @@
             browserVersion = ua.match(/(?:Opera|OPR)\/([\d.]+)/)?.[1] || '';
         }
 
-        // 检测操作系统 (注意：Chrome 90+ 会冻结 macOS 版本为 10.15.7)
         if (ua.includes('Windows NT 10')) {
             os = 'Windows';
             osVersion = '10/11';
@@ -40,7 +94,6 @@
             osVersion = '7';
         } else if (ua.includes('Mac OS X')) {
             os = 'macOS';
-            // 从 UA 提取版本（可能是冻结值）
             osVersion = ua.match(/Mac OS X ([\d_]+)/)?.[1]?.replace(/_/g, '.') || '';
         } else if (ua.includes('iPhone')) {
             os = 'iOS';
@@ -62,13 +115,10 @@
         return { browser, browserVersion, os, osVersion, deviceType };
     };
 
-    // 获取网络连接信息
     const getConnectionInfo = () => {
         const conn = navigator.connection || navigator.mozConnection || navigator.webkitConnection;
         if (conn) {
-            // 物理连接类型（部分浏览器支持）
             let physicalType = conn.type || '';
-            // 映射为中文
             const typeMap = {
                 'wifi': 'WiFi',
                 'cellular': '蜂窝网络',
@@ -81,7 +131,6 @@
             };
             physicalType = typeMap[physicalType] || physicalType;
 
-            // 等效连接速度
             const effectiveType = conn.effectiveType || '';
             const speedMap = {
                 '4g': '4G (快速)',
@@ -91,7 +140,6 @@
             };
             const speed = speedMap[effectiveType] || effectiveType;
 
-            // 组合显示
             let result = [];
             if (physicalType) result.push(physicalType);
             if (speed) result.push(speed);
@@ -106,7 +154,6 @@
         return { type: '浏览器不支持', downlink: '', rtt: '' };
     };
 
-    // 获取 WebGL 渲染器信息（显卡）
     const getWebGLInfo = () => {
         try {
             const canvas = document.createElement('canvas');
@@ -124,7 +171,6 @@
         return { vendor: '', renderer: '' };
     };
 
-    // 尝试使用 User-Agent Client Hints API 获取更准确信息
     const getClientHints = async () => {
         const hints = {
             platform: '',
@@ -136,7 +182,6 @@
 
         if (navigator.userAgentData) {
             try {
-                // 高熵值需要权限
                 const highEntropy = await navigator.userAgentData.getHighEntropyValues([
                     'platform',
                     'platformVersion',
@@ -151,7 +196,6 @@
                 hints.model = highEntropy.model || '';
                 hints.architecture = highEntropy.architecture || '';
             } catch (e) {
-                // 降级使用低熵值
                 hints.platform = navigator.userAgentData.platform || '';
                 hints.mobile = navigator.userAgentData.mobile || false;
             }
@@ -159,43 +203,63 @@
         return hints;
     };
 
-    // 主采集函数
-    const collectData = async () => {
+    const collectAnonymous = async () => {
+        const data = {
+            mode: 'anonymous',
+            page_load_time: getPageLoadTime(),
+            page_size: getPageSize()
+        };
+
+        const visitorId = getVisitorId();
+        if (visitorId) {
+            data.visitor_id = visitorId;
+        }
+
+        try {
+            const res = await fetch('/api.php?action=collect', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(data)
+            });
+            const json = await res.json();
+            if (json.id) {
+                setVisitorId(json.id);
+            }
+            return json;
+        } catch (err) {
+            console.error('匿名数据采集失败', err);
+            return null;
+        }
+    };
+
+    const collectFull = async () => {
         const uaInfo = parseUserAgent();
         const webglInfo = getWebGLInfo();
         const connInfo = getConnectionInfo();
         const clientHints = await getClientHints();
 
-        // 如果 Client Hints 提供了更准确的平台版本，使用它
         let finalOsVersion = uaInfo.osVersion;
         if (clientHints.platformVersion) {
             finalOsVersion = clientHints.platformVersion;
         }
 
-        // 基础数据
         const data = {
-            // 浏览器/系统信息
+            mode: 'full',
             browser: uaInfo.browser,
             browser_version: uaInfo.browserVersion,
             os: clientHints.platform || uaInfo.os,
             os_version: finalOsVersion,
             device_type: clientHints.mobile ? '手机' : uaInfo.deviceType,
 
-            // 屏幕信息
             screen_width: screen.width,
             screen_height: screen.height,
             window_width: window.innerWidth,
             window_height: window.innerHeight,
-            color_depth: screen.colorDepth,
-            pixel_ratio: window.devicePixelRatio || 1,
 
-            // 浏览器设置
             language: navigator.language || navigator.userLanguage || '未知',
             platform: navigator.platform || '未知',
             cookie_enabled: navigator.cookieEnabled ? 1 : 0,
-            do_not_track: navigator.doNotTrack === '1' ? 1 : 0,
 
-            // 硬件信息
             device_memory: navigator.deviceMemory || 0,
             cpu_cores: navigator.hardwareConcurrency || 0,
             touch_points: navigator.maxTouchPoints || 0,
@@ -203,39 +267,25 @@
             gpu_renderer: webglInfo.renderer,
             architecture: clientHints.architecture || '',
 
-            // 网络信息
             connection_type: connInfo.type,
-            connection_downlink: connInfo.downlink,
-            connection_rtt: connInfo.rtt,
 
-            // 时区
             timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-            timezone_offset: new Date().getTimezoneOffset(),
 
-            // 来源页面（完整地址 + 类型提示）
-            referrer: (() => {
-                const ref = document.referrer;
-                if (!ref) {
-                    return location.href + ' [直接访问]';
-                }
-                try {
-                    const refUrl = new URL(ref);
-                    if (refUrl.hostname === location.hostname) {
-                        return ref + ' [站内]';
-                    }
-                    return ref + ' [外部]';
-                } catch (e) {
-                    return ref;
-                }
-            })(),
+            referrer: document.referrer || '',
 
-            // IP 定位信息（默认值）
             country: '',
             city: '',
-            isp: ''
+            isp: '',
+
+            page_load_time: getPageLoadTime(),
+            page_size: getPageSize()
         };
 
-        // 尝试获取 IP 定位信息
+        const visitorId = getVisitorId();
+        if (visitorId) {
+            data.visitor_id = visitorId;
+        }
+
         try {
             const controller = new AbortController();
             const timeoutId = setTimeout(() => controller.abort(), 3000);
@@ -257,7 +307,6 @@
             console.log('IP 定位获取失败');
         }
 
-        // 提交数据
         try {
             const res = await fetch('/api.php?action=collect', {
                 method: 'POST',
@@ -265,19 +314,188 @@
                 body: JSON.stringify(data)
             });
             const json = await res.json();
-            console.log('采集完成', json);
             if (json.id) {
-                sessionStorage.setItem('visitor_id', json.id);
+                setVisitorId(json.id);
             }
+            return json;
         } catch (err) {
-            console.error('采集失败', err);
+            console.error('数据采集失败', err);
+            return null;
         }
     };
 
-    // 页面加载完成后执行
+    const grantConsent = async () => {
+        const visitorId = getVisitorId();
+        if (visitorId) {
+            try {
+                await fetch('/api.php?action=consent', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ id: visitorId, grant: true })
+                });
+            } catch (e) { }
+        }
+        setConsentStatus(1);
+        hideConsentBanner();
+        await collectFull();
+    };
+
+    const denyConsent = () => {
+        setConsentStatus(2);
+        hideConsentBanner();
+    };
+
+    const withdrawConsent = async () => {
+        const visitorId = getVisitorId();
+        if (visitorId) {
+            try {
+                await fetch('/api.php?action=consent', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ id: visitorId, grant: false })
+                });
+            } catch (e) { }
+        }
+        setConsentStatus(2);
+        alert('已撤回隐私授权，您的数据将被匿名化处理。');
+    };
+
+    const showConsentBanner = () => {
+        const banner = document.createElement('div');
+        banner.id = 'privacy-consent-banner';
+        banner.style.cssText = `
+            position: fixed;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            background: rgba(15, 23, 42, 0.95);
+            backdrop-filter: blur(10px);
+            border-top: 1px solid rgba(255, 255, 255, 0.1);
+            padding: 20px;
+            z-index: 99999;
+            color: #e2e8f0;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            font-size: 14px;
+        `;
+
+        banner.innerHTML = `
+            <div style="max-width: 1200px; margin: 0 auto; display: flex; flex-direction: column; gap: 16px; align-items: stretch;">
+                <div style="flex: 1;">
+                    <div style="font-weight: 600; margin-bottom: 8px; color: #fff;">
+                        🔒 隐私授权提示
+                    </div>
+                    <div style="line-height: 1.6; color: #94a3b8; font-size: 13px;">
+                        为了提供更好的测速体验，我们希望采集您的设备信息用于画像分析。
+                        <strong style="color: #60a5fa;">不同意也不会影响测速功能</strong>，
+                        我们只会匿名记录页面加载速度等性能数据。您可以随时在页脚撤回授权。
+                    </div>
+                </div>
+                <div style="display: flex; gap: 12px; justify-content: flex-end; flex-shrink: 0;">
+                    <button id="consent-deny" style="
+                        padding: 10px 20px;
+                        background: transparent;
+                        color: #94a3b8;
+                        border: 1px solid #334155;
+                        border-radius: 8px;
+                        cursor: pointer;
+                        font-size: 13px;
+                        transition: all 0.2s;
+                    " onmouseover="this.style.background='rgba(255,255,255,0.05)'" onmouseout="this.style.background='transparent'">
+                        暂不授权
+                    </button>
+                    <button id="consent-grant" style="
+                        padding: 10px 24px;
+                        background: linear-gradient(135deg, #3b82f6, #06b6d4);
+                        color: #fff;
+                        border: none;
+                        border-radius: 8px;
+                        cursor: pointer;
+                        font-size: 13px;
+                        font-weight: 600;
+                        transition: all 0.2s;
+                    " onmouseover="this.style.opacity='0.9'" onmouseout="this.style.opacity='1'">
+                        同意并授权
+                    </button>
+                </div>
+            </div>
+        `;
+
+        document.body.appendChild(banner);
+
+        document.getElementById('consent-grant').addEventListener('click', grantConsent);
+        document.getElementById('consent-deny').addEventListener('click', denyConsent);
+    };
+
+    const hideConsentBanner = () => {
+        const banner = document.getElementById('privacy-consent-banner');
+        if (banner) {
+            banner.style.transition = 'opacity 0.3s';
+            banner.style.opacity = '0';
+            setTimeout(() => banner.remove(), 300);
+        }
+    };
+
+    const addPrivacyLink = () => {
+        const footerInfo = document.querySelector('.grid.grid-cols-1.md\\:grid-cols-3');
+        if (footerInfo) {
+            const status = getConsentStatus();
+            const statusText = status === 1 ? '已授权' : status === 2 ? '未授权' : '未设置';
+
+            const linkDiv = document.createElement('div');
+            linkDiv.style.cssText = 'padding: 4px; cursor: pointer;';
+            linkDiv.innerHTML = `
+                <div id="privacy-status-icon" style="font-size: 24px; margin-bottom: 8px;">${status === 1 ? '✅' : '⚪'}</div>
+                <div style="font-weight: bold; color: white; margin-bottom: 4px;">隐私授权</div>
+                <div id="privacy-status-text" style="font-size: 12px; color: #64748b;">${statusText}</div>
+            `;
+            linkDiv.addEventListener('click', () => {
+                const currentStatus = getConsentStatus();
+                if (currentStatus === 1) {
+                    if (confirm('您确定要撤回隐私授权吗？撤回后您的历史数据将被匿名化处理。')) {
+                        withdrawConsent();
+                        document.getElementById('privacy-status-icon').textContent = '⚪';
+                        document.getElementById('privacy-status-text').textContent = '未授权';
+                    }
+                } else {
+                    showConsentBanner();
+                }
+            });
+
+            const cols = footerInfo.querySelectorAll('div');
+            if (cols.length >= 3) {
+                cols[2].style.display = 'none';
+            }
+            footerInfo.appendChild(linkDiv);
+        }
+    };
+
+    const init = async () => {
+        const consentStatus = getConsentStatus();
+        const visitorId = getVisitorId();
+
+        if (consentStatus === 0) {
+            await collectAnonymous();
+            setTimeout(showConsentBanner, 1000);
+        } else if (consentStatus === 1) {
+            await collectFull();
+        } else {
+            await collectAnonymous();
+        }
+
+        setTimeout(addPrivacyLink, 500);
+    };
+
+    window.SpeedProbePrivacy = {
+        getConsentStatus,
+        grantConsent,
+        denyConsent,
+        withdrawConsent,
+        showConsentBanner
+    };
+
     if (document.readyState === 'complete') {
-        collectData();
+        init();
     } else {
-        window.addEventListener('load', collectData);
+        window.addEventListener('load', init);
     }
 })();

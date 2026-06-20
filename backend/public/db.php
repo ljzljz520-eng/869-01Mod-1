@@ -63,10 +63,20 @@ class Database
             
             referrer TEXT,
             remark TEXT,
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            
+            privacy_consent INTEGER DEFAULT 0,
+            consent_time DATETIME,
+            withdraw_time DATETIME,
+            is_anonymized INTEGER DEFAULT 0,
+            
+            page_load_time INTEGER,
+            page_size INTEGER
         )";
 
         self::$pdo->exec($sql);
+
+        self::migrateTable();
 
         // 检查是否需要插入演示数据
         $count = self::$pdo->query("SELECT COUNT(*) FROM visitors")->fetchColumn();
@@ -75,12 +85,35 @@ class Database
         }
     }
 
+    private static function migrateTable()
+    {
+        $columns = self::$pdo->query("PRAGMA table_info(visitors)")->fetchAll(PDO::FETCH_COLUMN, 1);
+        $columns = array_flip($columns);
+
+        $addColumns = [
+            'privacy_consent' => 'INTEGER DEFAULT 0',
+            'consent_time' => 'DATETIME',
+            'withdraw_time' => 'DATETIME',
+            'is_anonymized' => 'INTEGER DEFAULT 0',
+            'page_load_time' => 'INTEGER',
+            'page_size' => 'INTEGER'
+        ];
+
+        foreach ($addColumns as $col => $definition) {
+            if (!isset($columns[$col])) {
+                self::$pdo->exec("ALTER TABLE visitors ADD COLUMN {$col} {$definition}");
+            }
+        }
+    }
+
     private static function seedData()
     {
         $stmt = self::$pdo->prepare("INSERT INTO visitors (
-            ip, country, city, isp, user_agent, browser, os, screen_width, screen_height, remark, created_at
+            ip, country, city, isp, user_agent, browser, os, screen_width, screen_height, remark, created_at,
+            privacy_consent, consent_time, is_anonymized, page_load_time, page_size
         ) VALUES (
-            :ip, :country, :city, :isp, :user_agent, :browser, :os, :screen_width, :screen_height, :remark, :created_at
+            :ip, :country, :city, :isp, :user_agent, :browser, :os, :screen_width, :screen_height, :remark, :created_at,
+            :privacy_consent, :consent_time, :is_anonymized, :page_load_time, :page_size
         )");
 
         $demos = [
@@ -94,8 +127,13 @@ class Database
                 ':os' => 'Mac OS X',
                 ':screen_width' => 1920,
                 ':screen_height' => 1080,
-                ':remark' => '测试数据 A',
-                ':created_at' => date('Y-m-d H:i:s', strtotime('-1 hour'))
+                ':remark' => '测试数据 A - 已授权',
+                ':created_at' => date('Y-m-d H:i:s', strtotime('-1 hour')),
+                ':privacy_consent' => 1,
+                ':consent_time' => date('Y-m-d H:i:s', strtotime('-1 hour')),
+                ':is_anonymized' => 0,
+                ':page_load_time' => 1250,
+                ':page_size' => 2048
             ],
             [
                 ':ip' => '10.0.0.5',
@@ -107,8 +145,31 @@ class Database
                 ':os' => 'iOS',
                 ':screen_width' => 390,
                 ':screen_height' => 844,
-                ':remark' => '测试数据 B - 手机端',
-                ':created_at' => date('Y-m-d H:i:s', strtotime('-2 hours'))
+                ':remark' => '测试数据 B - 未授权',
+                ':created_at' => date('Y-m-d H:i:s', strtotime('-2 hours')),
+                ':privacy_consent' => 0,
+                ':consent_time' => null,
+                ':is_anonymized' => 0,
+                ':page_load_time' => 2100,
+                ':page_size' => 1536
+            ],
+            [
+                ':ip' => '172.16.0.20',
+                ':country' => 'China',
+                ':city' => 'Guangzhou',
+                ':isp' => 'China Mobile',
+                ':user_agent' => 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)...',
+                ':browser' => 'Edge',
+                ':os' => 'Windows',
+                ':screen_width' => 1366,
+                ':screen_height' => 768,
+                ':remark' => '测试数据 C - 已撤回',
+                ':created_at' => date('Y-m-d H:i:s', strtotime('-3 hours')),
+                ':privacy_consent' => 2,
+                ':consent_time' => date('Y-m-d H:i:s', strtotime('-3 hours')),
+                ':is_anonymized' => 1,
+                ':page_load_time' => 890,
+                ':page_size' => 1792
             ]
         ];
 

@@ -14,6 +14,95 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
 $action = $_GET['action'] ?? '';
 $pdo = Database::connect();
 
+$sensitiveFields = ['ip', 'user_agent', 'country', 'city', 'isp', 'referrer'];
+$profileFields = ['screen_width', 'screen_height', 'language', 'timezone', 'platform', 'device_memory', 'cpu_cores'];
+
+function anonymizeData($row, $level)
+{
+    global $sensitiveFields, $profileFields;
+
+    if ($level === 'none' || $level === 'withdrawn') {
+        foreach ($sensitiveFields as $field) {
+            if (isset($row[$field])) {
+                $row[$field] = maskValue($field, $row[$field]);
+            }
+        }
+        foreach ($profileFields as $field) {
+            if (isset($row[$field]) && !empty($row[$field])) {
+                if ($level === 'withdrawn') {
+                    $row[$field] = '';
+                }
+            }
+        }
+        if ($level === 'withdrawn' && isset($row['remark'])) {
+            $row['remark'] = '';
+        }
+    } elseif ($level === 'partial') {
+        foreach (['ip', 'user_agent', 'country', 'city', 'isp', 'referrer'] as $field) {
+            if (isset($row[$field])) {
+                $row[$field] = maskValue($field, $row[$field]);
+            }
+        }
+    }
+
+    return $row;
+}
+
+function maskValue($field, $value)
+{
+    if (empty($value)) return '';
+
+    switch ($field) {
+        case 'ip':
+            if (strpos($value, '.') !== false) {
+                $parts = explode('.', $value);
+                if (count($parts) >= 2) {
+                    return $parts[0] . '.' . $parts[1] . '.*.*';
+                }
+            }
+            return substr($value, 0, 3) . '***';
+        case 'user_agent':
+            if (strlen($value) > 20) {
+                return substr($value, 0, 10) . '***' . substr($value, -5);
+            }
+            return '***';
+        case 'country':
+        case 'city':
+            if (strlen($value) > 2) {
+                return mb_substr($value, 0, 1) . '*';
+            }
+            return '*';
+        case 'isp':
+            if (strlen($value) > 4) {
+                return mb_substr($value, 0, 2) . '**';
+            }
+            return '**';
+        case 'referrer':
+            try {
+                $url = parse_url($value);
+                return ($url['scheme'] ?? 'https') . '://***';
+            } catch (Exception $e) {
+                return '***';
+            }
+        default:
+            return '***';
+    }
+}
+
+function getPrivacyLevel($row)
+{
+    $consent = $row['privacy_consent'] ?? 0;
+    $anonymized = $row['is_anonymized'] ?? 0;
+
+    if ($anonymized == 1) {
+        return 'withdrawn';
+    }
+    if ($consent == 1) {
+        return 'full';
+    }
+    return 'none';
+}
+
 try {
     switch ($action) {
         case 'collect':
@@ -22,7 +111,19 @@ try {
             }
             $input = json_decode(file_get_contents('php://input'), true);
 
-            // 获取真实 IP
+            $mode = $input['mode'] ?? 'full';
+            $visitorId = $input['visitor_id'] ?? null;
+
+            if ($visitorId) {
+                $existing = $pdo->prepare("SELECT * FROM visitors WHERE id = ?");
+                $existing->execute([$visitorId]);
+                $visitor = $existing->fetch();
+                if ($visitor) {
+                    echo json_encode(['status' => 'success', 'id' => $visitorId, 'consent' => (int)$visitor['privacy_consent']]);
+                    break;
+                }
+            }
+
             $ip = $_SERVER['REMOTE_ADDR'];
             if (!empty($_SERVER['HTTP_X_FORWARDED_FOR'])) {
                 $ip = explode(',', $_SERVER['HTTP_X_FORWARDED_FOR'])[0];
@@ -31,13 +132,11 @@ try {
             }
             $ip = trim($ip);
 
-            // 服务端 IP 定位（如果客户端没有提供）
             $country = $input['country'] ?? '';
             $city = $input['city'] ?? '';
             $isp = $input['isp'] ?? '';
 
-            if (empty($country) && empty($city)) {
-                // 尝试服务端获取 IP 定位
+            if ($mode === 'full' && empty($country) && empty($city)) {
                 $geoUrl = "http://ip-api.com/json/{$ip}?lang=zh-CN";
                 $context = stream_context_create([
                     'http' => [
@@ -56,59 +155,149 @@ try {
                 }
             }
 
-            // 补全服务端信息
-            $data = [
-                ':ip' => $ip,
-                ':user_agent' => $_SERVER['HTTP_USER_AGENT'] ?? '',
-                ':country' => $country,
-                ':city' => $city,
-                ':isp' => $isp,
+            if ($mode === 'anonymous') {
+                $data = [
+                    ':ip' => '',
+                    ':user_agent' => '',
+                    ':country' => '',
+                    ':city' => '',
+                    ':isp' => '',
+                    ':browser' => '',
+                    ':browser_version' => '',
+                    ':os' => '',
+                    ':os_version' => '',
+                    ':device_type' => '',
+                    ':screen_width' => 0,
+                    ':screen_height' => 0,
+                    ':window_width' => 0,
+                    ':window_height' => 0,
+                    ':language' => '',
+                    ':timezone' => '',
+                    ':platform' => '',
+                    ':cookie_enabled' => 0,
+                    ':touch_points' => 0,
+                    ':device_memory' => 0,
+                    ':cpu_cores' => 0,
+                    ':connection_type' => '',
+                    ':referrer' => '',
+                    ':remark' => '',
+                    ':privacy_consent' => 0,
+                    ':consent_time' => null,
+                    ':is_anonymized' => 0,
+                    ':page_load_time' => $input['page_load_time'] ?? null,
+                    ':page_size' => $input['page_size'] ?? null
+                ];
 
-                ':browser' => $input['browser'] ?? '未知',
-                ':browser_version' => $input['browser_version'] ?? '',
-                ':os' => $input['os'] ?? '未知',
-                ':os_version' => $input['os_version'] ?? '',
-                ':device_type' => $input['device_type'] ?? '桌面设备',
+                $sql = "INSERT INTO visitors (
+                    ip, user_agent, country, city, isp,
+                    browser, browser_version, os, os_version, device_type,
+                    screen_width, screen_height, window_width, window_height,
+                    language, timezone, platform, cookie_enabled,
+                    touch_points, device_memory, cpu_cores, connection_type,
+                    referrer, remark, privacy_consent, consent_time, is_anonymized,
+                    page_load_time, page_size
+                ) VALUES (
+                    :ip, :user_agent, :country, :city, :isp,
+                    :browser, :browser_version, :os, :os_version, :device_type,
+                    :screen_width, :screen_height, :window_width, :window_height,
+                    :language, :timezone, :platform, :cookie_enabled,
+                    :touch_points, :device_memory, :cpu_cores, :connection_type,
+                    :referrer, :remark, :privacy_consent, :consent_time, :is_anonymized,
+                    :page_load_time, :page_size
+                )";
 
-                ':screen_width' => $input['screen_width'] ?? 0,
-                ':screen_height' => $input['screen_height'] ?? 0,
-                ':window_width' => $input['window_width'] ?? 0,
-                ':window_height' => $input['window_height'] ?? 0,
+                $stmt = $pdo->prepare($sql);
+                $stmt->execute($data);
+                $newId = $pdo->lastInsertId();
 
-                ':language' => $input['language'] ?? '',
-                ':timezone' => $input['timezone'] ?? '',
-                ':platform' => $input['platform'] ?? '',
-                ':cookie_enabled' => isset($input['cookie_enabled']) ? ($input['cookie_enabled'] ? 1 : 0) : 0,
+                echo json_encode(['status' => 'success', 'id' => $newId, 'consent' => 0]);
+            } else {
+                $data = [
+                    ':ip' => $ip,
+                    ':user_agent' => $_SERVER['HTTP_USER_AGENT'] ?? '',
+                    ':country' => $country,
+                    ':city' => $city,
+                    ':isp' => $isp,
+                    ':browser' => $input['browser'] ?? '未知',
+                    ':browser_version' => $input['browser_version'] ?? '',
+                    ':os' => $input['os'] ?? '未知',
+                    ':os_version' => $input['os_version'] ?? '',
+                    ':device_type' => $input['device_type'] ?? '桌面设备',
+                    ':screen_width' => $input['screen_width'] ?? 0,
+                    ':screen_height' => $input['screen_height'] ?? 0,
+                    ':window_width' => $input['window_width'] ?? 0,
+                    ':window_height' => $input['window_height'] ?? 0,
+                    ':language' => $input['language'] ?? '',
+                    ':timezone' => $input['timezone'] ?? '',
+                    ':platform' => $input['platform'] ?? '',
+                    ':cookie_enabled' => isset($input['cookie_enabled']) ? ($input['cookie_enabled'] ? 1 : 0) : 0,
+                    ':touch_points' => $input['touch_points'] ?? 0,
+                    ':device_memory' => $input['device_memory'] ?? 0,
+                    ':cpu_cores' => $input['cpu_cores'] ?? 0,
+                    ':connection_type' => $input['connection_type'] ?? '',
+                    ':referrer' => $input['referrer'] ?? '',
+                    ':remark' => '',
+                    ':privacy_consent' => 1,
+                    ':consent_time' => date('Y-m-d H:i:s'),
+                    ':is_anonymized' => 0,
+                    ':page_load_time' => $input['page_load_time'] ?? null,
+                    ':page_size' => $input['page_size'] ?? null
+                ];
 
-                ':touch_points' => $input['touch_points'] ?? 0,
-                ':device_memory' => $input['device_memory'] ?? 0,
-                ':cpu_cores' => $input['cpu_cores'] ?? 0,
-                ':connection_type' => $input['connection_type'] ?? '',
+                $sql = "INSERT INTO visitors (
+                    ip, user_agent, country, city, isp,
+                    browser, browser_version, os, os_version, device_type,
+                    screen_width, screen_height, window_width, window_height,
+                    language, timezone, platform, cookie_enabled,
+                    touch_points, device_memory, cpu_cores, connection_type,
+                    referrer, remark, privacy_consent, consent_time, is_anonymized,
+                    page_load_time, page_size
+                ) VALUES (
+                    :ip, :user_agent, :country, :city, :isp,
+                    :browser, :browser_version, :os, :os_version, :device_type,
+                    :screen_width, :screen_height, :window_width, :window_height,
+                    :language, :timezone, :platform, :cookie_enabled,
+                    :touch_points, :device_memory, :cpu_cores, :connection_type,
+                    :referrer, :remark, :privacy_consent, :consent_time, :is_anonymized,
+                    :page_load_time, :page_size
+                )";
 
-                ':referrer' => $input['referrer'] ?? '',
-                ':remark' => ''
-            ];
+                $stmt = $pdo->prepare($sql);
+                $stmt->execute($data);
+                $newId = $pdo->lastInsertId();
 
-            $sql = "INSERT INTO visitors (
-                ip, user_agent, country, city, isp,
-                browser, browser_version, os, os_version, device_type,
-                screen_width, screen_height, window_width, window_height,
-                language, timezone, platform, cookie_enabled,
-                touch_points, device_memory, cpu_cores, connection_type,
-                referrer, remark
-            ) VALUES (
-                :ip, :user_agent, :country, :city, :isp,
-                :browser, :browser_version, :os, :os_version, :device_type,
-                :screen_width, :screen_height, :window_width, :window_height,
-                :language, :timezone, :platform, :cookie_enabled,
-                :touch_points, :device_memory, :cpu_cores, :connection_type,
-                :referrer, :remark
-            )";
+                echo json_encode(['status' => 'success', 'id' => $newId, 'consent' => 1]);
+            }
+            break;
 
-            $stmt = $pdo->prepare($sql);
-            $stmt->execute($data);
+        case 'consent':
+            if ($_SERVER['REQUEST_METHOD'] !== 'POST') {
+                throw new Exception('Invalid method');
+            }
+            $input = json_decode(file_get_contents('php://input'), true);
+            $id = $input['id'] ?? 0;
+            $grant = $input['grant'] ?? false;
 
-            echo json_encode(['status' => 'success', 'id' => $pdo->lastInsertId()]);
+            if (!$id)
+                throw new Exception('ID required');
+
+            $stmt = $pdo->prepare("SELECT * FROM visitors WHERE id = ?");
+            $stmt->execute([$id]);
+            $visitor = $stmt->fetch();
+
+            if (!$visitor) {
+                throw new Exception('记录不存在');
+            }
+
+            if ($grant) {
+                $updateStmt = $pdo->prepare("UPDATE visitors SET privacy_consent = 1, consent_time = ?, is_anonymized = 0 WHERE id = ?");
+                $updateStmt->execute([date('Y-m-d H:i:s'), $id]);
+            } else {
+                $updateStmt = $pdo->prepare("UPDATE visitors SET privacy_consent = 2, withdraw_time = ?, is_anonymized = 1 WHERE id = ?");
+                $updateStmt->execute([date('Y-m-d H:i:s'), $id]);
+            }
+
+            echo json_encode(['status' => 'success']);
             break;
 
         case 'list':
@@ -121,19 +310,28 @@ try {
             $params = [];
 
             if ($search) {
-                $where .= " AND (ip LIKE :search OR remark LIKE :search OR city LIKE :search)";
+                $where .= " AND (remark LIKE :search";
                 $params[':search'] = "%$search%";
+
+                $where .= " OR (privacy_consent = 1 AND is_anonymized = 0 AND (";
+                $where .= "ip LIKE :search OR city LIKE :search OR country LIKE :search OR isp LIKE :search";
+                $where .= " OR browser LIKE :search OR os LIKE :search";
+                $where .= "))";
             }
 
-            // count
             $countStmt = $pdo->prepare("SELECT COUNT(*) FROM visitors $where");
             $countStmt->execute($params);
             $total = $countStmt->fetchColumn();
 
-            // data
             $stmt = $pdo->prepare("SELECT * FROM visitors $where ORDER BY created_at DESC LIMIT $limit OFFSET $offset");
             $stmt->execute($params);
             $list = $stmt->fetchAll();
+
+            foreach ($list as &$row) {
+                $level = getPrivacyLevel($row);
+                $row = anonymizeData($row, $level);
+            }
+            unset($row);
 
             echo json_encode([
                 'status' => 'success',
@@ -141,6 +339,28 @@ try {
                 'total' => $total,
                 'page' => $page,
                 'pages' => ceil($total / $limit)
+            ]);
+            break;
+
+        case 'detail':
+            $id = $_GET['id'] ?? 0;
+            if (!$id)
+                throw new Exception('ID required');
+
+            $stmt = $pdo->prepare("SELECT * FROM visitors WHERE id = ?");
+            $stmt->execute([$id]);
+            $visitor = $stmt->fetch();
+
+            if (!$visitor) {
+                throw new Exception('记录不存在');
+            }
+
+            $level = getPrivacyLevel($visitor);
+            $visitor = anonymizeData($visitor, $level);
+
+            echo json_encode([
+                'status' => 'success',
+                'data' => $visitor
             ]);
             break;
 
@@ -155,6 +375,18 @@ try {
             if (!$id)
                 throw new Exception('ID required');
 
+            $stmt = $pdo->prepare("SELECT is_anonymized, privacy_consent FROM visitors WHERE id = ?");
+            $stmt->execute([$id]);
+            $visitor = $stmt->fetch();
+
+            if (!$visitor) {
+                throw new Exception('记录不存在');
+            }
+
+            if ($visitor['is_anonymized'] == 1) {
+                throw new Exception('已撤回授权的记录无法编辑备注');
+            }
+
             $stmt = $pdo->prepare("UPDATE visitors SET remark = :remark WHERE id = :id");
             $stmt->execute([':remark' => $remark, ':id' => $id]);
 
@@ -162,21 +394,82 @@ try {
             break;
 
         case 'stats':
-            // 今日访问统计
             $today = date('Y-m-d');
+
             $todayStmt = $pdo->prepare("SELECT COUNT(*) FROM visitors WHERE DATE(created_at) = :today");
             $todayStmt->execute([':today' => $today]);
             $todayCount = $todayStmt->fetchColumn();
 
-            // 总访问量
             $totalStmt = $pdo->query("SELECT COUNT(*) FROM visitors");
             $totalCount = $totalStmt->fetchColumn();
+
+            $consentedStmt = $pdo->query("SELECT COUNT(*) FROM visitors WHERE privacy_consent = 1 AND is_anonymized = 0");
+            $consentedCount = $consentedStmt->fetchColumn();
+
+            $anonStmt = $pdo->query("SELECT COUNT(*) FROM visitors WHERE is_anonymized = 1");
+            $anonCount = $anonStmt->fetchColumn();
+
+            $slowStmt = $pdo->prepare("SELECT COUNT(*) FROM visitors WHERE page_load_time > 2000");
+            $slowStmt->execute();
+            $slowCount = $slowStmt->fetchColumn();
+
+            $avgStmt = $pdo->query("SELECT AVG(page_load_time) FROM visitors WHERE page_load_time IS NOT NULL");
+            $avgResult = $avgStmt->fetchColumn();
+            $avgLoadTime = $avgResult ? round($avgResult, 0) : 0;
 
             echo json_encode([
                 'status' => 'success',
                 'total' => $totalCount,
-                'today' => $todayCount
+                'today' => $todayCount,
+                'consented' => $consentedCount,
+                'anonymized' => $anonCount,
+                'slow_pages' => $slowCount,
+                'avg_load_time' => $avgLoadTime
             ]);
+            break;
+
+        case 'export':
+            $format = $_GET['format'] ?? 'csv';
+            $search = $_GET['search'] ?? '';
+
+            $where = "WHERE 1=1";
+            $params = [];
+
+            if ($search) {
+                $where .= " AND remark LIKE :search";
+                $params[':search'] = "%$search%";
+            }
+
+            $stmt = $pdo->prepare("SELECT * FROM visitors $where ORDER BY created_at DESC");
+            $stmt->execute($params);
+            $list = $stmt->fetchAll();
+
+            foreach ($list as &$row) {
+                $level = getPrivacyLevel($row);
+                $row = anonymizeData($row, $level);
+                unset($row['user_agent']);
+            }
+            unset($row);
+
+            if ($format === 'json') {
+                echo json_encode([
+                    'status' => 'success',
+                    'data' => $list
+                ]);
+            } else {
+                header('Content-Type: text/csv; charset=utf-8');
+                header('Content-Disposition: attachment; filename="visitors.csv"');
+
+                $output = fopen('php://output', 'w');
+                if (!empty($list)) {
+                    fputcsv($output, array_keys($list[0]));
+                    foreach ($list as $row) {
+                        fputcsv($output, $row);
+                    }
+                }
+                fclose($output);
+                exit;
+            }
             break;
 
         default:
