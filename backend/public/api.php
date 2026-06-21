@@ -114,16 +114,6 @@ try {
             $mode = $input['mode'] ?? 'full';
             $visitorId = $input['visitor_id'] ?? null;
 
-            if ($visitorId) {
-                $existing = $pdo->prepare("SELECT * FROM visitors WHERE id = ?");
-                $existing->execute([$visitorId]);
-                $visitor = $existing->fetch();
-                if ($visitor) {
-                    echo json_encode(['status' => 'success', 'id' => $visitorId, 'consent' => (int)$visitor['privacy_consent']]);
-                    break;
-                }
-            }
-
             $ip = $_SERVER['REMOTE_ADDR'];
             if (!empty($_SERVER['HTTP_X_FORWARDED_FOR'])) {
                 $ip = explode(',', $_SERVER['HTTP_X_FORWARDED_FOR'])[0];
@@ -155,64 +145,75 @@ try {
                 }
             }
 
+            $existingVisitor = null;
+            if ($visitorId) {
+                $existing = $pdo->prepare("SELECT * FROM visitors WHERE id = ?");
+                $existing->execute([$visitorId]);
+                $existingVisitor = $existing->fetch();
+            }
+
             if ($mode === 'anonymous') {
-                $data = [
-                    ':ip' => '',
-                    ':user_agent' => '',
-                    ':country' => '',
-                    ':city' => '',
-                    ':isp' => '',
-                    ':browser' => '',
-                    ':browser_version' => '',
-                    ':os' => '',
-                    ':os_version' => '',
-                    ':device_type' => '',
-                    ':screen_width' => 0,
-                    ':screen_height' => 0,
-                    ':window_width' => 0,
-                    ':window_height' => 0,
-                    ':language' => '',
-                    ':timezone' => '',
-                    ':platform' => '',
-                    ':cookie_enabled' => 0,
-                    ':touch_points' => 0,
-                    ':device_memory' => 0,
-                    ':cpu_cores' => 0,
-                    ':connection_type' => '',
-                    ':referrer' => '',
-                    ':remark' => '',
-                    ':privacy_consent' => 0,
-                    ':consent_time' => null,
-                    ':is_anonymized' => 0,
-                    ':page_load_time' => $input['page_load_time'] ?? null,
-                    ':page_size' => $input['page_size'] ?? null
-                ];
+                if ($existingVisitor) {
+                    echo json_encode(['status' => 'success', 'id' => $visitorId, 'consent' => (int)$existingVisitor['privacy_consent']]);
+                } else {
+                    $data = [
+                        ':ip' => '',
+                        ':user_agent' => '',
+                        ':country' => '',
+                        ':city' => '',
+                        ':isp' => '',
+                        ':browser' => '',
+                        ':browser_version' => '',
+                        ':os' => '',
+                        ':os_version' => '',
+                        ':device_type' => '',
+                        ':screen_width' => 0,
+                        ':screen_height' => 0,
+                        ':window_width' => 0,
+                        ':window_height' => 0,
+                        ':language' => '',
+                        ':timezone' => '',
+                        ':platform' => '',
+                        ':cookie_enabled' => 0,
+                        ':touch_points' => 0,
+                        ':device_memory' => 0,
+                        ':cpu_cores' => 0,
+                        ':connection_type' => '',
+                        ':referrer' => '',
+                        ':remark' => '',
+                        ':privacy_consent' => 0,
+                        ':consent_time' => null,
+                        ':is_anonymized' => 0,
+                        ':page_load_time' => $input['page_load_time'] ?? null,
+                        ':page_size' => $input['page_size'] ?? null
+                    ];
 
-                $sql = "INSERT INTO visitors (
-                    ip, user_agent, country, city, isp,
-                    browser, browser_version, os, os_version, device_type,
-                    screen_width, screen_height, window_width, window_height,
-                    language, timezone, platform, cookie_enabled,
-                    touch_points, device_memory, cpu_cores, connection_type,
-                    referrer, remark, privacy_consent, consent_time, is_anonymized,
-                    page_load_time, page_size
-                ) VALUES (
-                    :ip, :user_agent, :country, :city, :isp,
-                    :browser, :browser_version, :os, :os_version, :device_type,
-                    :screen_width, :screen_height, :window_width, :window_height,
-                    :language, :timezone, :platform, :cookie_enabled,
-                    :touch_points, :device_memory, :cpu_cores, :connection_type,
-                    :referrer, :remark, :privacy_consent, :consent_time, :is_anonymized,
-                    :page_load_time, :page_size
-                )";
+                    $sql = "INSERT INTO visitors (
+                        ip, user_agent, country, city, isp,
+                        browser, browser_version, os, os_version, device_type,
+                        screen_width, screen_height, window_width, window_height,
+                        language, timezone, platform, cookie_enabled,
+                        touch_points, device_memory, cpu_cores, connection_type,
+                        referrer, remark, privacy_consent, consent_time, is_anonymized,
+                        page_load_time, page_size
+                    ) VALUES (
+                        :ip, :user_agent, :country, :city, :isp,
+                        :browser, :browser_version, :os, :os_version, :device_type,
+                        :screen_width, :screen_height, :window_width, :window_height,
+                        :language, :timezone, :platform, :cookie_enabled,
+                        :touch_points, :device_memory, :cpu_cores, :connection_type,
+                        :referrer, :remark, :privacy_consent, :consent_time, :is_anonymized,
+                        :page_load_time, :page_size
+                    )";
 
-                $stmt = $pdo->prepare($sql);
-                $stmt->execute($data);
-                $newId = $pdo->lastInsertId();
+                    $stmt = $pdo->prepare($sql);
+                    $stmt->execute($data);
+                    $newId = $pdo->lastInsertId();
 
-                echo json_encode(['status' => 'success', 'id' => $newId, 'consent' => 0]);
+                    echo json_encode(['status' => 'success', 'id' => $newId, 'consent' => 0]);
+                }
             } else {
-                $data = [
+                $fullData = [
                     ':ip' => $ip,
                     ':user_agent' => $_SERVER['HTTP_USER_AGENT'] ?? '',
                     ':country' => $country,
@@ -236,7 +237,6 @@ try {
                     ':cpu_cores' => $input['cpu_cores'] ?? 0,
                     ':connection_type' => $input['connection_type'] ?? '',
                     ':referrer' => $input['referrer'] ?? '',
-                    ':remark' => '',
                     ':privacy_consent' => 1,
                     ':consent_time' => date('Y-m-d H:i:s'),
                     ':is_anonymized' => 0,
@@ -244,29 +244,70 @@ try {
                     ':page_size' => $input['page_size'] ?? null
                 ];
 
-                $sql = "INSERT INTO visitors (
-                    ip, user_agent, country, city, isp,
-                    browser, browser_version, os, os_version, device_type,
-                    screen_width, screen_height, window_width, window_height,
-                    language, timezone, platform, cookie_enabled,
-                    touch_points, device_memory, cpu_cores, connection_type,
-                    referrer, remark, privacy_consent, consent_time, is_anonymized,
-                    page_load_time, page_size
-                ) VALUES (
-                    :ip, :user_agent, :country, :city, :isp,
-                    :browser, :browser_version, :os, :os_version, :device_type,
-                    :screen_width, :screen_height, :window_width, :window_height,
-                    :language, :timezone, :platform, :cookie_enabled,
-                    :touch_points, :device_memory, :cpu_cores, :connection_type,
-                    :referrer, :remark, :privacy_consent, :consent_time, :is_anonymized,
-                    :page_load_time, :page_size
-                )";
+                if ($existingVisitor && $existingVisitor['is_anonymized'] == 0) {
+                    $fullData[':id'] = $visitorId;
+                    $updateSql = "UPDATE visitors SET
+                        ip = :ip,
+                        user_agent = :user_agent,
+                        country = :country,
+                        city = :city,
+                        isp = :isp,
+                        browser = :browser,
+                        browser_version = :browser_version,
+                        os = :os,
+                        os_version = :os_version,
+                        device_type = :device_type,
+                        screen_width = :screen_width,
+                        screen_height = :screen_height,
+                        window_width = :window_width,
+                        window_height = :window_height,
+                        language = :language,
+                        timezone = :timezone,
+                        platform = :platform,
+                        cookie_enabled = :cookie_enabled,
+                        touch_points = :touch_points,
+                        device_memory = :device_memory,
+                        cpu_cores = :cpu_cores,
+                        connection_type = :connection_type,
+                        referrer = :referrer,
+                        privacy_consent = :privacy_consent,
+                        consent_time = :consent_time,
+                        is_anonymized = :is_anonymized,
+                        page_load_time = COALESCE(:page_load_time, page_load_time),
+                        page_size = COALESCE(:page_size, page_size)
+                        WHERE id = :id";
 
-                $stmt = $pdo->prepare($sql);
-                $stmt->execute($data);
-                $newId = $pdo->lastInsertId();
+                    $stmt = $pdo->prepare($updateSql);
+                    $stmt->execute($fullData);
 
-                echo json_encode(['status' => 'success', 'id' => $newId, 'consent' => 1]);
+                    echo json_encode(['status' => 'success', 'id' => $visitorId, 'consent' => 1, 'updated' => true]);
+                } else {
+                    $fullData[':remark'] = '';
+
+                    $sql = "INSERT INTO visitors (
+                        ip, user_agent, country, city, isp,
+                        browser, browser_version, os, os_version, device_type,
+                        screen_width, screen_height, window_width, window_height,
+                        language, timezone, platform, cookie_enabled,
+                        touch_points, device_memory, cpu_cores, connection_type,
+                        referrer, remark, privacy_consent, consent_time, is_anonymized,
+                        page_load_time, page_size
+                    ) VALUES (
+                        :ip, :user_agent, :country, :city, :isp,
+                        :browser, :browser_version, :os, :os_version, :device_type,
+                        :screen_width, :screen_height, :window_width, :window_height,
+                        :language, :timezone, :platform, :cookie_enabled,
+                        :touch_points, :device_memory, :cpu_cores, :connection_type,
+                        :referrer, :remark, :privacy_consent, :consent_time, :is_anonymized,
+                        :page_load_time, :page_size
+                    )";
+
+                    $stmt = $pdo->prepare($sql);
+                    $stmt->execute($fullData);
+                    $newId = $pdo->lastInsertId();
+
+                    echo json_encode(['status' => 'success', 'id' => $newId, 'consent' => 1]);
+                }
             }
             break;
 
@@ -310,13 +351,21 @@ try {
             $params = [];
 
             if ($search) {
-                $where .= " AND (remark LIKE :search";
-                $params[':search'] = "%$search%";
+                $searchPattern = "%$search%";
+                $where .= " AND (remark LIKE :s_remark";
+                $params[':s_remark'] = $searchPattern;
 
                 $where .= " OR (privacy_consent = 1 AND is_anonymized = 0 AND (";
-                $where .= "ip LIKE :search OR city LIKE :search OR country LIKE :search OR isp LIKE :search";
-                $where .= " OR browser LIKE :search OR os LIKE :search";
-                $where .= "))";
+                $where .= "ip LIKE :s_ip OR city LIKE :s_city OR country LIKE :s_country OR isp LIKE :s_isp";
+                $where .= " OR browser LIKE :s_browser OR os LIKE :s_os";
+                $where .= ")))";
+
+                $params[':s_ip'] = $searchPattern;
+                $params[':s_city'] = $searchPattern;
+                $params[':s_country'] = $searchPattern;
+                $params[':s_isp'] = $searchPattern;
+                $params[':s_browser'] = $searchPattern;
+                $params[':s_os'] = $searchPattern;
             }
 
             $countStmt = $pdo->prepare("SELECT COUNT(*) FROM visitors $where");
